@@ -10,6 +10,7 @@
   var source = null;
   var retry = 0;
   var userStopped = false;
+  var ended = false;
 
   function el(id) {
     return document.getElementById(id);
@@ -97,6 +98,21 @@
     }
   }
 
+  function clearColumns() {
+    var bits = el("rx-bits");
+    var bytes = el("rx-bytes");
+    var out = el("rx-out");
+    if (bits) {
+      bits.innerHTML =
+        '<p class="p-2 text-slate-600" data-empty>Waiting for symbols\u2026</p>';
+    }
+    if (bytes) {
+      bytes.innerHTML =
+        '<p class="p-2 text-slate-600" data-empty>Waiting for a full byte\u2026</p>';
+    }
+    if (out) out.textContent = "";
+  }
+
   function handle(data) {
     var bits = el("rx-bits");
     var bytes = el("rx-bytes");
@@ -116,8 +132,13 @@
         if (bits) systemNote(bits, "\u2014 byte boundary \u2014");
         break;
       case "end":
-        if (bits) systemNote(bits, "end of message", "warn");
-        break;
+        // End-of-message tone received: stop receiving and keep everything on
+        // screen. Returning true tells the caller to close the stream for good
+        // so the browser's EventSource doesn't auto-reconnect and replay this.
+        setStatus(false);
+        if (!ended && bits) systemNote(bits, "end of message", "warn");
+        ended = true;
+        return true;
       case "running":
       case "status":
         setStatus(!!data.running || data.type === "running");
@@ -130,6 +151,7 @@
         setStatus(false);
         break;
     }
+    return false;
   }
 
   function connect() {
@@ -144,12 +166,20 @@
         return;
       }
       retry = 0;
-      handle(data);
+      if (handle(data)) {
+        // End of message (or its replay): stop the native auto-reconnect for
+        // good so the stream isn't reopened and the note isn't repeated.
+        userStopped = true;
+        if (source) {
+          source.close();
+          source = null;
+        }
+      }
     };
     source.onerror = function () {
       // The browser auto-reconnects EventSource on transient network errors;
       // if the server closed the stream we reconnect ourselves with backoff,
-      // unless the user explicitly pressed Stop.
+      // unless reception has ended or the user pressed Stop.
       if (source && source.readyState === EventSource.CLOSED && !userStopped) {
         source.close();
         retry = Math.min(retry + 1, 8);
@@ -176,6 +206,8 @@
       : null;
     if (start) {
       userStopped = false;
+      ended = false;
+      clearColumns();
       window.setTimeout(connect, 100);
     }
   });

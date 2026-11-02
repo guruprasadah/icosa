@@ -148,18 +148,31 @@ class ReceiverState:
         self.broadcaster = Broadcaster("rx")
         self.running = False
         self.assembled: str = ""
+        # True once an end-of-message tone has been decoded; prevents an
+        # automatic reconnect from reopening the mic or wiping the output.
+        self.finished = False
         self._stop_timer: asyncio.Task | None = None
 
     # --- lifecycle ---------------------------------------------------------
-    def start(self) -> None:
-        """Start listening; no-op if already running."""
+    def start(self, *, fresh: bool = False) -> None:
+        """Start listening; no-op if already running.
+
+        :param fresh: Clear any previously assembled output and end-of-message
+            latch. Set for an explicit user Start; automatic starts triggered by
+            a client connecting preserve the current output.
+        """
         if self._stop_timer is not None:
             self._stop_timer.cancel()
             self._stop_timer = None
         if self.task is not None and not self.task.done():
             return
-        self.broadcaster = Broadcaster("rx")
-        self.assembled = ""
+        # A finished session stays finished until the user asks to start again.
+        if self.finished and not fresh:
+            return
+        if fresh:
+            self.broadcaster = Broadcaster("rx")
+            self.assembled = ""
+            self.finished = False
         self.stop_event = asyncio.Event()
         self.running = True
         self.task = asyncio.create_task(self._run(self.stop_event))
@@ -180,6 +193,8 @@ class ReceiverState:
             if self.broadcaster.subscriber_count == 0:
                 self.stop()
 
+        if self.finished:
+            return
         if self._stop_timer is not None:
             self._stop_timer.cancel()
         self._stop_timer = asyncio.ensure_future(_delayed())
@@ -220,6 +235,9 @@ class ReceiverState:
         elif isinstance(event, RxMarker):
             self.broadcaster.publish({"type": "marker"})
         elif isinstance(event, RxEnd):
+            # The end tone was received: latch so we don't auto-restart and
+            # keep the assembled message on screen.
+            self.finished = True
             self.broadcaster.publish({"type": "end", "text": self.assembled})
 
     def status(self) -> dict:
@@ -325,7 +343,7 @@ def create_app() -> FastAPI:
 
     @app.post("/rx/start", response_class=HTMLResponse)
     async def rx_start(request: Request) -> HTMLResponse:
-        rx.start()
+        rx.start(fresh=True)
         return _TEMPLATES.TemplateResponse(
             request, "partials/rx_status.html", {"running": rx.running}
         )
@@ -340,7 +358,9 @@ def create_app() -> FastAPI:
     @app.get("/rx/events")
     async def rx_events() -> StreamingResponse:
         """Stream decoder events (symbols, bytes, assembled text) as SSE."""
-        # Auto-start the mic when a client connects (the UI's on-load contract).
+        # Auto-start the mic when a client connects (the UI's on-load contract),
+        # unless we already finished a message and are waiting for the user to
+        # explicitly start a new session.
         rx.start()
 
         async def gen() -> AsyncIterator[str]:
@@ -348,6 +368,11 @@ def create_app() -> FastAPI:
                 # Replay current assembled text so a reload shows prior output.
                 yield _sse({"type": "assembled", "text": rx.assembled})
                 yield _sse(rx.status())
+                if rx.finished and not rx.running:
+                    # Hold the display steady; nothing more will arrive until
+                    # the user presses Start again.
+                    yield _sse({"type": "end", "text": rx.assembled})
+                    return
                 try:
                     async for event in rx.broadcaster.stream():
                         yield _sse(event)
