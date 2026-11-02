@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}icosa &middot; choose mode{% endblock %}
+{% block content %}
+<div class="flex flex-col items-center justify-center py-16 text-center">
+  <h1 class="text-3xl font-semibold tracking-tight text-slate-100">
+    Choose a mode
+  </h1>
+  <p class="mt-3 max-w-md text-sm leading-relaxed text-slate-400">
+    Send data out through your speaker, or listen in through your microphone and
+    watch it get decoded symbol by symbol.
+  </p>
+
+  <div class="mt-10 grid w-full max-w-2xl grid-cols-1 gap-5 sm:grid-cols-2">
+    <a href="/tx"
+       class="group flex flex-col items-start gap-3 rounded-2xl border border-slate-800 bg-panel p-6 text-left transition hover:border-accent hover:shadow-lg hover:shadow-accent/10">
+      <span class="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-700/60 text-lg text-accent ring-1 ring-inset ring-accent/30">
+        &#9650;
+      </span>
+      <span class="text-lg font-medium text-slate-100 group-hover:text-accent">Transmitter</span>
+      <span class="text-sm text-slate-400">
+        Type a message and watch how it splits into tone bursts before you play it.
+      </span>
+    </a>
+
+    <a href="/rx"
+       class="group flex flex-col items-start gap-3 rounded-2xl border border-slate-800 bg-panel p-6 text-left transition hover:border-accent hover:shadow-lg hover:shadow-accent/10">
+      <span class="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-700/60 text-lg text-accent ring-1 ring-inset ring-accent/30">
+        &#9660;
+      </span>
+      <span class="text-lg font-medium text-slate-100 group-hover:text-accent">Receiver</span>
+      <span class="text-sm text-slate-400">
+        Open the mic and watch bits, bytes and the assembled message arrive live.
+      </span>
+    </a>
+  </div>
+</div>
+{% endblock %}

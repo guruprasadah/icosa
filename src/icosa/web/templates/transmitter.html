@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}icosa &middot; transmitter{% endblock %}
+{% block content %}
+<div class="mb-6 flex items-center gap-3">
+  <a href="/"
+     class="rounded-lg border border-slate-800 px-3 py-1.5 text-sm text-slate-400 transition hover:border-slate-600 hover:text-slate-200">
+    &larr; Back
+  </a>
+  <h1 class="text-xl font-semibold tracking-tight text-slate-100">Transmitter</h1>
+</div>
+
+<div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+  <!-- Composer -->
+  <section class="flex flex-col gap-4 rounded-2xl border border-slate-800 bg-panel p-5">
+    <label for="tx-text" class="text-sm font-medium text-slate-300">Message</label>
+    <textarea id="tx-text" name="text" rows="6"
+              placeholder="Type something to transmit&hellip;"
+              class="scroll-thin w-full resize-y rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-sm text-slate-100 placeholder-slate-600 outline-none transition focus:border-accent"
+              hx-post="/tx/plan" hx-target="#tx-plan" hx-swap="innerHTML"
+              hx-trigger="input changed delay:250ms, load"></textarea>
+
+    <div class="flex items-center justify-between gap-3">
+      <span class="text-xs text-slate-500">
+        Sent as UTF-8, plus an end-of-message sentinel byte.
+      </span>
+      <button type="button"
+              hx-post="/tx/start" hx-include="#tx-text"
+              class="rounded-xl bg-accent px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-sky-300 disabled:cursor-not-allowed disabled:opacity-40">
+        &#9650; Transmit
+      </button>
+    </div>
+
+    <!-- Live progress log -->
+    <div class="rounded-xl border border-slate-800 bg-slate-950">
+      <div class="flex items-center justify-between border-b border-slate-800 px-3 py-2">
+        <span class="text-xs font-medium uppercase tracking-widest text-slate-500">Progress</span>
+        <span id="tx-progress-hint" class="font-mono text-[11px] text-slate-600">idle</span>
+      </div>
+      <div id="tx-progress"
+           class="scroll-thin h-40 space-y-1 overflow-y-auto p-2 font-mono text-xs">
+        <div id="tx-progress-placeholder" class="p-2 text-slate-600">
+          Press Transmit to start&hellip;
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Plan -->
+  <section>
+    <details class="group rounded-2xl border border-slate-800 bg-panel" open>
+      <summary class="flex cursor-pointer items-center justify-between rounded-2xl px-5 py-4 text-sm font-medium text-slate-300 transition hover:text-slate-100">
+        <span class="flex items-center gap-2">
+          <span class="text-slate-600 transition group-open:rotate-90">&#9656;</span>
+          Transmission plan
+        </span>
+        <span id="tx-plan-count" class="font-mono text-xs text-slate-500"></span>
+      </summary>
+      <div id="tx-plan" class="scroll-thin max-h-[32rem] overflow-y-auto border-t border-slate-800 p-3">
+        {% include "partials/tx_plan.html" %}
+      </div>
+    </details>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/transmitter.js"></script>
+{% endblock %}

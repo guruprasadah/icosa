@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}icosa &middot; receiver{% endblock %}
+{% block content %}
+<div class="mb-6 flex items-center justify-between gap-3">
+  <div class="flex items-center gap-3">
+    <a href="/"
+       class="rounded-lg border border-slate-800 px-3 py-1.5 text-sm text-slate-400 transition hover:border-slate-600 hover:text-slate-200">
+      &larr; Back
+    </a>
+    <h1 class="text-xl font-semibold tracking-tight text-slate-100">Receiver</h1>
+  </div>
+  <div id="rx-status">
+    {% include "partials/rx_status.html" %}
+  </div>
+</div>
+
+<div id="rx-root" class="grid grid-cols-1 gap-4 md:grid-cols-3">
+
+  <!-- Column 1: bit pairs -->
+  <section class="flex min-h-0 flex-col rounded-2xl border border-slate-800 bg-panel">
+    <header class="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
+      <span class="text-xs font-medium uppercase tracking-widest text-slate-500">Bit pairs</span>
+      <span class="font-mono text-[11px] text-slate-600">live</span>
+    </header>
+    <div id="rx-bits" class="scroll-thin h-[28rem] space-y-1 overflow-y-auto p-2 font-mono text-xs">
+      <p class="p-2 text-slate-600" data-empty>Waiting for symbols&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Column 2: bytes -->
+  <section class="flex min-h-0 flex-col rounded-2xl border border-slate-800 bg-panel">
+    <header class="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
+      <span class="text-xs font-medium uppercase tracking-widest text-slate-500">Bytes</span>
+      <span class="font-mono text-[11px] text-slate-600">complete</span>
+    </header>
+    <div id="rx-bytes" class="scroll-thin h-[28rem] space-y-1 overflow-y-auto p-2 font-mono text-xs">
+      <p class="p-2 text-slate-600" data-empty>Waiting for a full byte&hellip;</p>
+    </div>
+  </section>
+
+  <!-- Column 3: assembled output -->
+  <section class="flex min-h-0 flex-col rounded-2xl border border-slate-800 bg-panel">
+    <header class="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
+      <span class="text-xs font-medium uppercase tracking-widest text-slate-500">Assembled</span>
+      <span class="font-mono text-[11px] text-slate-600">message</span>
+    </header>
+    <div id="rx-out"
+         class="scroll-thin h-[28rem] overflow-y-auto whitespace-pre-wrap break-words rounded-b-2xl bg-slate-950 p-4 font-mono text-sm leading-relaxed text-emerald-300">
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/receiver.js"></script>
+{% endblock %}

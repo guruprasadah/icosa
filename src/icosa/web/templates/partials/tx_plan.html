@@ -1,0 +1,60 @@
+{# Transmission plan preview: one block per byte, markers between bytes. #}
+{% if not blocks is defined or not blocks %}
+  <p class="p-6 text-center text-sm text-slate-600">
+    Start typing to preview how your message will be split up.
+  </p>
+{% else %}
+  <div class="space-y-3">
+    {% for block in blocks %}
+      <div class="rounded-lg border border-slate-800/70 bg-slate-950/60">
+        <div class="flex items-center justify-between border-b border-slate-800/70 px-3 py-1.5">
+          <span class="font-mono text-[11px] uppercase tracking-widest text-slate-500">
+            byte {{ block.index }}
+          </span>
+          {% if block.is_eom %}
+            <span class="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-400">
+              end of message
+            </span>
+          {% elif block.index < n_bytes %}
+            <span class="font-mono text-[11px] text-slate-600">
+              &ldquo;{{ text[block.index] }}&rdquo;
+            </span>
+          {% endif %}
+        </div>
+        <div class="divide-y divide-slate-800/50">
+          {% for sym in block.symbols %}
+            <div class="flex items-center gap-3 px-3 py-1.5 font-mono text-xs">
+              <span class="inline-flex h-5 w-5 items-center justify-center rounded
+                           {{ 'bg-sky-500/15 text-sky-300' if sym.slot == 'A' else 'bg-violet-500/15 text-violet-300' }}">
+                {{ sym.slot }}
+              </span>
+              <span class="text-slate-500">pair</span>
+              <span class="w-20 text-slate-200">
+                {% if sym.pair == 0 %}&#9633;&#9633;{% elif sym.pair == 1 %}&#9633;&#9632;{% elif sym.pair == 2 %}&#9632;&#9633;{% else %}&#9632;&#9632;{% endif %}
+                {{ "{:02b}".format(sym.pair) }}
+              </span>
+              <span class="ml-auto text-slate-500 tabular-nums">
+                {{ sym.freq_a }}<span class="text-slate-700">+</span>{{ sym.freq_b }} Hz
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% if block.marker %}
+        <div class="flex items-center gap-2 px-3 font-mono text-[11px] text-slate-600">
+          <span class="h-px flex-1 bg-slate-800"></span>
+          marker {{ protocol.marker_freq }} Hz
+          <span class="h-px flex-1 bg-slate-800"></span>
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+{% endif %}
+{# Out-of-band update of the collapsed summary's byte/symbol count. #}
+{% if n_bytes is defined %}
+<span id="tx-plan-count" hx-swap-oob="true" class="font-mono text-xs text-slate-500">
+  {%- if n_bytes -%}
+    {{ n_bytes }} bytes &middot; {{ n_symbols }} symbols
+  {%- endif -%}
+</span>
+{% endif %}

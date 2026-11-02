@@ -8,6 +8,10 @@ dependencies = [
     "numpy",
     "sounddevice",
     "audioflux",
+    "fastapi",
+    "uvicorn",
+    "jinja2",
+    "python-multipart",
 ]
 
 [project.scripts]

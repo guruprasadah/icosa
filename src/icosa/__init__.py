@@ -13,6 +13,7 @@ A marker tone at BASE + 1000 is emitted after every 4th symbol (end of each byte
 Usage:
     icosa --tx "hello world"
     icosa --rx            # Ctrl+C to stop
+    icosa --serve         # web UI on http://127.0.0.1:8000
 """
 
 from __future__ import annotations
@@ -54,9 +55,34 @@ async def _main_async(argv: list[str] | None = None) -> None:
         action="store_true",
         help="listen on the microphone and decode (Ctrl+C to stop)",
     )
+    mode.add_argument(
+        "--serve",
+        action="store_true",
+        help="serve the FastAPI + HTMX web UI",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="host to bind the web UI to (with --serve)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="port to bind the web UI to (with --serve)",
+    )
     args = parser.parse_args(argv)
 
-    if args.tx is not None:
+    if args.serve:
+        import uvicorn
+
+        from .web import create_app
+
+        config = uvicorn.Config(
+            create_app(), host=args.host, port=args.port, log_level="info"
+        )
+        await uvicorn.Server(config).serve()
+    elif args.tx is not None:
         await transmit(bytearray(args.tx, encoding="utf-8"))
     else:
         async with contextlib.aclosing(receive()) as chunks:

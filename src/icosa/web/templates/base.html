@@ -1,0 +1,56 @@
+{# Base layout: shared head, Tailwind Play CDN, HTMX + SSE extension. #}
+<!doctype html>
+<html lang="en" class="h-full bg-slate-950 text-slate-200">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}icosa{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              accent: "#38bdf8",
+              panel: "#0b1220",
+            },
+            fontFamily: {
+              mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+            },
+          },
+        },
+      };
+    </script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <style>
+      /* Thin scrollbars that fit the dark theme. */
+      .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+      .scroll-thin::-webkit-scrollbar-thumb {
+        background: #1e293b; border-radius: 9999px;
+      }
+      .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+    </style>
+  </head>
+  <body class="h-full font-sans antialiased">
+    <div class="mx-auto flex min-h-full max-w-6xl flex-col px-6 py-8">
+      <header class="mb-6 flex items-baseline justify-between">
+        <a href="/" class="group flex items-center gap-2">
+          <span class="text-xl font-semibold tracking-tight text-slate-100 group-hover:text-accent">
+            icosa
+          </span>
+          <span class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-widest text-slate-400">
+            acoustic link
+          </span>
+        </a>
+        <span class="font-mono text-xs text-slate-500">
+          {{ protocol.base_freq }}&ndash;{{ protocol.marker_freq }} Hz
+        </span>
+      </header>
+      <main class="flex-1">{% block content %}{% endblock %}</main>
+      <footer class="mt-8 border-t border-slate-800 pt-4 text-xs text-slate-600">
+        Near-ultrasonic 2-bit symbol protocol &middot; {{ protocol.symbols_per_byte }} symbols/byte
+      </footer>
+    </div>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>
