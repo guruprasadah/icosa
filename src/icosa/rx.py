@@ -1,6 +1,6 @@
 """Reception: listen on the microphone and decode acoustic tone bursts.
 
-Public entry point: :func:`receive`.
+Public entry points: :func:`receive` and :func:`receive_events`.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import numpy as np
 import sounddevice as sd
@@ -31,6 +32,39 @@ from .constants import (
 from .log import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RxSymbol:
+    """A single received 2-bit symbol (one bit pair)."""
+
+    slot: str
+    pair: int
+
+
+@dataclass(frozen=True)
+class RxByte:
+    """A complete received byte (four bit pairs packed MSB-first)."""
+
+    value: int
+    symbols: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class RxMarker:
+    """A detected byte-boundary marker."""
+
+    pass
+
+
+@dataclass(frozen=True)
+class RxEnd:
+    """Sentinel yielded once when the end-of-message marker is decoded."""
+
+    pass
+
+
+RxEvent = RxSymbol | RxByte | RxMarker | RxEnd
 
 
 def _open_input_stream(**kwargs) -> sd.InputStream:
@@ -58,10 +92,15 @@ def bit_pairs_to_bytes(bit_pairs: list[int]) -> bytearray:
     return byte_data
 
 
-async def receive(
+async def receive_events(
     *, stop_event: asyncio.Event | None = None
-) -> AsyncIterator[bytes]:
-    """Listen on the microphone and yield decoded payload bytes as they arrive.
+) -> AsyncIterator[RxEvent]:
+    """Listen on the microphone and yield structured decode events as they occur.
+
+    Yields :class:`RxSymbol` for each bit pair, :class:`RxByte` for each
+    completed byte, :class:`RxMarker` on byte boundaries, and :class:`RxEnd`
+    when the end-of-message sentinel is decoded. This lets a UI render the
+    three-stage view (bit pairs -> bytes -> assembled output) directly.
 
     The PortAudio callback runs on a real-time thread and hands blocks to an
     `asyncio.Queue` via `call_soon_threadsafe`; the decoding loop awaits that
@@ -120,7 +159,7 @@ async def receive(
     buffer = np.zeros(BLOCK_LENGTH, dtype=np.float32)
     last_b = True
     base = BASE_FREQ
-    pending: list[int] = []
+    pending: list[RxSymbol] = []
 
     logger.info("Targeting: %s Hz", float(BASE_FREQ))
     logger.info("Listening...")
@@ -142,16 +181,23 @@ async def receive(
                 # Pad any missed symbols so we land on a byte boundary. This is
                 # idempotent, so repeat detections of the same marker are harmless.
                 if pending:
-                    pending.extend([SYMBOL_PAD] * (-len(pending) % SYMBOLS_PER_BYTE))
-                    yield bytes(bit_pairs_to_bytes(pending))
+                    pairs = [s.pair for s in pending]
+                    pairs.extend([SYMBOL_PAD] * (-len(pairs) % SYMBOLS_PER_BYTE))
+                    yield RxByte(
+                        value=bit_pairs_to_bytes(pairs)[0],
+                        symbols=tuple(pairs),
+                    )
                     pending.clear()
+                yield RxMarker()
                 # A byte always ends on a slot B symbol, so the next is slot A.
                 last_b = True
                 continue
 
             if magnitudes[fidx(base)] > THRESHOLD and last_b:
                 ms = [magnitudes[fidx(base + k * TONE_STEP)] for k in (1, 2, 3, 4)]
-                pending.append(ms.index(max(ms)))
+                symbol = RxSymbol(slot="A", pair=ms.index(max(ms)))
+                pending.append(symbol)
+                yield symbol
                 last_b = False
 
             if magnitudes[fidx(base + SLOT_OFFSET)] > THRESHOLD and not last_b:
@@ -159,19 +205,38 @@ async def receive(
                     magnitudes[fidx(base + SLOT_OFFSET + k * TONE_STEP)]
                     for k in (1, 2, 3, 4)
                 ]
-                pending.append(ms.index(max(ms)))
+                symbol = RxSymbol(slot="B", pair=ms.index(max(ms)))
+                pending.append(symbol)
+                yield symbol
                 last_b = True
 
             if len(pending) == SYMBOLS_PER_BYTE:
-                byte_val = bit_pairs_to_bytes(pending)[0]
+                byte_val = bit_pairs_to_bytes([s.pair for s in pending])[0]
+                byte_symbols = tuple(s.pair for s in pending)
                 pending.clear()
                 if byte_val == END_OF_MESSAGE:
                     # End-of-message sentinel ([0, 1, 0, 1] in 2-bit symbols).
+                    yield RxEnd()
                     return
-                yield bytes([byte_val])
+                yield RxByte(value=byte_val, symbols=byte_symbols)
     finally:
         if watcher is not None:
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
         await asyncio.to_thread(stream.close)
+
+
+async def receive(
+    *, stop_event: asyncio.Event | None = None
+) -> AsyncIterator[bytes]:
+    """Listen on the microphone and yield decoded payload bytes as they arrive.
+
+    Thin wrapper over :func:`receive_events` that surfaces only payload bytes
+    (preserving the original CLI-facing behaviour).
+    """
+    async for event in receive_events(stop_event=stop_event):
+        if isinstance(event, RxByte):
+            yield bytes([event.value])
+        elif isinstance(event, RxEnd):
+            return

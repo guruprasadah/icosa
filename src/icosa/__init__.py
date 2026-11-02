@@ -22,10 +22,18 @@ import asyncio
 import contextlib
 import sys
 
-from .rx import receive
-from .tx import transmit
+from .rx import receive, receive_events
+from .tx import build_transmit_plan, transmit, transmit_stream
 
-__all__ = ["transmit", "receive", "main", "__version__"]
+__all__ = [
+    "transmit",
+    "transmit_stream",
+    "build_transmit_plan",
+    "receive",
+    "receive_events",
+    "main",
+    "__version__",
+]
 
 __version__ = "0.1.0"
 

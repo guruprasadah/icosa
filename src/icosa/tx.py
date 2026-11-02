@@ -1,6 +1,7 @@
 """Transmission: encode bytes into acoustic tone bursts and play them.
 
-Public entry point: :func:`transmit`.
+Public entry points: :func:`transmit`, :func:`transmit_stream`, and
+:func:`build_transmit_plan`.
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ import asyncio
 import contextlib
 import logging
 import weakref
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 import numpy as np
 import sounddevice as sd
@@ -26,6 +29,92 @@ from .constants import (
 from .log import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TxSymbol:
+    """A single 2-bit symbol burst in the transmission plan.
+
+    :param index: Zero-based symbol index across the whole message.
+    :param slot: Which slot the burst occupies (``"A"`` or ``"B"``).
+    :param pair: The 2-bit value (0-3) this symbol encodes.
+    :param byte_index: Which byte this symbol belongs to (including the
+        end-of-message sentinel byte).
+    :param freq_a: Lower tone in Hz.
+    :param freq_b: Upper tone in Hz.
+    :param is_end_of_message: True if this symbol belongs to the trailing
+        end-of-message sentinel byte.
+    """
+
+    index: int
+    slot: str
+    pair: int
+    byte_index: int
+    freq_a: int
+    freq_b: int
+    is_end_of_message: bool = False
+
+
+@dataclass(frozen=True)
+class TxMarker:
+    """The byte-boundary marker tone emitted after every 4th symbol."""
+
+    index: int
+    freq: int
+
+
+TxEvent = TxSymbol | TxMarker
+
+
+@dataclass(frozen=True)
+class TxDone:
+    """Sentinel yielded once at the end of a transmission stream."""
+
+    pass
+
+
+def _frequencies_for(slot: str, pair: int) -> tuple[int, int]:
+    """Return the (lower, upper) tone frequencies for a symbol in a slot."""
+    base = BASE_FREQ if slot == "A" else BASE_FREQ + SLOT_OFFSET
+    lower = base
+    upper = base + (pair + 1) * TONE_STEP
+    return lower, upper
+
+
+def build_transmit_plan(data: bytearray) -> list[TxEvent]:
+    """Build the full itemized transmission plan for ``data`` as structured events.
+
+    This is pure CPU work with no audio side effects; it is what the UI renders
+    as the "how your data will be split up" preview.
+
+    :param data: Payload bytes to transmit.
+    :returns: A flat list of :class:`TxSymbol` and :class:`TxMarker` events in
+        transmission order. The end-of-message sentinel byte is included and its
+        symbols are flagged with :attr:`TxSymbol.is_end_of_message`.
+    """
+    payload = data + bytearray([END_OF_MESSAGE])
+    bps = bytearray_to_bit_pairs(payload)
+    events: list[TxEvent] = []
+
+    slot_a = True
+    for ind, bp in enumerate(bps):
+        slot = "A" if slot_a else "B"
+        lower, upper = _frequencies_for(slot, bp)
+        events.append(
+            TxSymbol(
+                index=ind,
+                slot=slot,
+                pair=bp,
+                byte_index=ind // 4,
+                freq_a=lower,
+                freq_b=upper,
+                is_end_of_message=(ind // 4) == len(data),  # sentinel byte
+            )
+        )
+        if ind % 4 == 3:
+            events.append(TxMarker(index=ind, freq=BASE_FREQ + MARKER_OFFSET))
+        slot_a = not slot_a
+    return events
 
 
 def render_burst(
@@ -183,28 +272,34 @@ def _tx_lock() -> asyncio.Lock:
     return lock
 
 
-async def transmit(data: bytearray) -> None:
-    """Encode and play ``data`` as a sequence of acoustic tone bursts."""
+async def transmit_stream(data: bytearray) -> AsyncIterator[TxEvent | TxDone]:
+    """Encode and play ``data``, yielding one structured event per burst.
+
+    Unlike :func:`transmit`, this generator emits :class:`TxSymbol` /
+    :class:`TxMarker` events as each burst is played (and a :class:`TxDone`
+    sentinel at the end), so a UI can render live progress without re-deriving
+    the plan from the raw bytes.
+
+    :param data: Payload bytes to transmit.
+    :returns: An async iterator yielding events in transmission order.
+    """
     setup_logging(logger_name=__name__)
     async with _tx_lock():
-        payload = data + bytearray([END_OF_MESSAGE])
-        bps = bytearray_to_bit_pairs(payload)
-        logger.info("Transmitting %d bytes (%d symbols)", len(data), len(bps))
-        a = True
-        for ind, bp in enumerate(bps):
-            base = BASE_FREQ
-            d = base + (bp + 1) * TONE_STEP
-            if not a:
-                base += SLOT_OFFSET
-                d += SLOT_OFFSET
-            logger.debug("symbol %d: slot %s tones %d/%d Hz", ind, "A" if a else "B", base, d)
-            await play_frequencies_ifft([base, d], duration=SYMBOL_DURATION)
-            if ind % 4 == 3:
-                # End of a byte (4 symbols): emit the boundary marker. Use
-                # BASE_FREQ explicitly since `base` is shifted by SLOT_OFFSET on
-                # odd (slot B) symbols.
+        events = build_transmit_plan(data)
+        logger.info("Transmitting %d bytes (%d symbols)", len(data), len(events))
+        for event in events:
+            if isinstance(event, TxMarker):
+                await play_frequencies_ifft([event.freq], duration=SYMBOL_DURATION)
+            else:
                 await play_frequencies_ifft(
-                    [BASE_FREQ + MARKER_OFFSET], duration=SYMBOL_DURATION
+                    [event.freq_a, event.freq_b], duration=SYMBOL_DURATION
                 )
-            a = not a
+            yield event
         logger.info("Transmission complete")
+        yield TxDone()
+
+
+async def transmit(data: bytearray) -> None:
+    """Encode and play ``data`` as a sequence of acoustic tone bursts."""
+    async for _ in transmit_stream(data):
+        pass
