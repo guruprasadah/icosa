@@ -12,19 +12,27 @@ A marker tone at BASE + 1000 is emitted after every 4th symbol (end of each byte
 
 Usage:
     icosa --tx "hello world"
-    icosa --rx            # Ctrl+C to stop and print decoded text
+    icosa --rx            # Ctrl+C to stop
 """
 
+from __future__ import annotations
+
 import argparse
-import queue
+import asyncio
+import contextlib
+import logging
 import sys
+import weakref
+from collections.abc import AsyncIterator
 
 import numpy as np
 import sounddevice as sd
 
+logger = logging.getLogger(__name__)
+
 # --- SHARED CONFIGURATION ---
 SAMPLING_RATE = 44100
-BASE_FREQ = 18000
+BASE_FREQ = 16000
 SYMBOL_DURATION = 0.15  # seconds per tone burst (TX)
 
 # --- RX CONFIGURATION ---
@@ -40,13 +48,18 @@ SLIDE_LENGTH = BLOCK_LENGTH // 2
 # =============================================================================
 
 
-def play_frequencies_ifft(frequencies, duration=2.0, sample_rate=SAMPLING_RATE):
+def render_burst(
+    frequencies, duration=SYMBOL_DURATION, sample_rate=SAMPLING_RATE
+) -> np.ndarray:
     """
-    Generates a multi-frequency signal using Inverse FFT and plays it.
+    Renders a multi-frequency burst using Inverse FFT.
+
+    This is pure CPU work and is safe to call directly from an event loop.
 
     :param frequencies: List or array of target frequencies in Hz
     :param duration: Duration of the audio in seconds
     :param sample_rate: Audio sampling rate (default 44100 Hz)
+    :returns: A one-dimensional float array containing the audio samples
     """
     # 1. Calculate total number of samples
     n_samples = int(sample_rate * duration)
@@ -90,9 +103,90 @@ def play_frequencies_ifft(frequencies, duration=2.0, sample_rate=SAMPLING_RATE):
     if max_val > 0:
         audio_signal = audio_signal / max_val
 
-    # 6. Play the audio and wait until it finishes
-    sd.play(audio_signal, samplerate=sample_rate)
-    sd.wait()
+    return audio_signal
+
+
+def _open_output_stream(**kwargs) -> sd.OutputStream:
+    """Create and start an output stream (called from a worker thread)."""
+    stream = sd.OutputStream(**kwargs)
+    try:
+        stream.start()
+    except BaseException:
+        stream.close(ignore_errors=True)
+        raise
+    return stream
+
+
+def _open_input_stream(**kwargs) -> sd.InputStream:
+    """Create and start an input stream (called from a worker thread)."""
+    stream = sd.InputStream(**kwargs)
+    try:
+        stream.start()
+    except BaseException:
+        stream.close(ignore_errors=True)
+        raise
+    return stream
+
+
+async def _play(signal: np.ndarray, sample_rate: int) -> None:
+    """Play an audio buffer and await its completion without blocking the loop."""
+    loop = asyncio.get_running_loop()
+    done = asyncio.Event()
+    signal = np.asarray(signal, dtype=np.float32)
+    position = 0
+
+    def callback(outdata, frames, time_info, status):
+        nonlocal position
+        if status:
+            logger.warning("%s", status)
+
+        remaining = len(signal) - position
+        n = min(frames, remaining)
+        if n > 0:
+            outdata[:n, 0] = signal[position : position + n]
+            position += n
+
+        # The callback must always fill the whole buffer. Once the signal is
+        # exhausted, pad with silence and tell PortAudio to play out what it has
+        # and then finish (CallbackStop, not CallbackAbort, avoids truncation).
+        if n < frames:
+            outdata[n:, 0] = 0.0
+            raise sd.CallbackStop
+
+    def finished() -> None:
+        # Invoked from PortAudio's thread; hop back onto the event loop.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(done.set)
+
+    stream = await asyncio.to_thread(
+        _open_output_stream,
+        samplerate=sample_rate,
+        channels=1,
+        dtype="float32",
+        callback=callback,
+        finished_callback=finished,
+    )
+    try:
+        await done.wait()
+    finally:
+        await asyncio.to_thread(stream.close)
+
+
+async def play_frequencies_ifft(
+    frequencies, duration=2.0, sample_rate=SAMPLING_RATE
+) -> None:
+    """
+    Generates a multi-frequency signal using Inverse FFT and plays it.
+
+    Rendering happens synchronously on the event loop (it is short CPU work);
+    playback is awaited via the audio stream's finished callback.
+
+    :param frequencies: List or array of target frequencies in Hz
+    :param duration: Duration of the audio in seconds
+    :param sample_rate: Audio sampling rate (default 44100 Hz)
+    """
+    signal = render_burst(frequencies, duration, sample_rate)
+    await _play(signal, sample_rate)
 
 
 def bytearray_to_bit_pairs(data: bytearray, msb_first: bool = True) -> list[int]:
@@ -105,21 +199,40 @@ def bytearray_to_bit_pairs(data: bytearray, msb_first: bool = True) -> list[int]
         return [(byte >> shift) & 0x03 for byte in data for shift in (0, 2, 4, 6)]
 
 
-def transmit(data: bytearray) -> None:
-    bps = bytearray_to_bit_pairs(data + bytearray([17]))
-    a = True
-    for ind, bp in enumerate(bps):
-        base = BASE_FREQ
-        d = base + (bp + 1) * 100
-        if not a:
-            base += 500
-            d += 500
-        play_frequencies_ifft([base, d], duration=SYMBOL_DURATION)
-        if ind % 4 == 3:
-            # End of a byte (4 symbols): emit the boundary marker. Use BASE_FREQ
-            # explicitly since `base` is shifted by 500 on odd (slot B) symbols.
-            play_frequencies_ifft([BASE_FREQ + 1000], duration=SYMBOL_DURATION)
-        a = not a
+# Playback is a process-global resource (`sd.play` stops any previous playback),
+# so transmissions must be serialized. Keep one lock per event loop so repeated
+# `asyncio.run()` calls (tests, CLI invocations) don't share a bound loop.
+_tx_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _tx_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _tx_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _tx_locks[loop] = lock
+    return lock
+
+
+async def transmit(data: bytearray) -> None:
+    async with _tx_lock():
+        bps = bytearray_to_bit_pairs(data + bytearray([17]))
+        a = True
+        for ind, bp in enumerate(bps):
+            base = BASE_FREQ
+            d = base + (bp + 1) * 100
+            if not a:
+                base += 500
+                d += 500
+            await play_frequencies_ifft([base, d], duration=SYMBOL_DURATION)
+            if ind % 4 == 3:
+                # End of a byte (4 symbols): emit the boundary marker. Use
+                # BASE_FREQ explicitly since `base` is shifted by 500 on odd
+                # (slot B) symbols.
+                await play_frequencies_ifft(
+                    [BASE_FREQ + 1000], duration=SYMBOL_DURATION
+                )
+            a = not a
 
 
 # =============================================================================
@@ -141,12 +254,25 @@ def bit_pairs_to_bytes(bit_pairs: list[int]) -> bytearray:
     return byte_data
 
 
-def receive() -> None:
+async def receive(
+    *, stop_event: asyncio.Event | None = None
+) -> AsyncIterator[bytes]:
+    """Listen on the microphone and yield decoded payload bytes as they arrive.
+
+    The PortAudio callback runs on a real-time thread and hands blocks to an
+    `asyncio.Queue` via `call_soon_threadsafe`; the decoding loop awaits that
+    queue, so the event loop stays free while waiting for audio.
+
+    Set `stop_event` to stop gracefully (e.g. on ASGI shutdown); cancelling the
+    consumer also closes the stream.
+    """
     # Imported lazily so that `--tx` works without audioflux installed/loaded.
     import audioflux as af
     from audioflux.type import SpectralFilterBankScaleType
 
-    audio_queue: queue.Queue = queue.Queue()
+    loop = asyncio.get_running_loop()
+    audio_queue: asyncio.Queue = asyncio.Queue()
+    stop_sentinel = object()
 
     bft = af.BFT(
         num=BLOCK_LENGTH // 2 + 1,
@@ -162,67 +288,85 @@ def receive() -> None:
 
     def audio_callback(indata, frames, time_info, status):
         if status:
-            print(status, file=sys.stderr)
-        audio_queue.put(indata.copy())
+            logger.warning("%s", status)
+        try:
+            loop.call_soon_threadsafe(audio_queue.put_nowait, indata.copy())
+        except RuntimeError:
+            # The loop was closed while the stream was shutting down.
+            pass
 
-    print(f"Targeting: {float(BASE_FREQ)} Hz")
-    print("Listening... Press Ctrl+C to stop.\n")
+    stream = await asyncio.to_thread(
+        _open_input_stream,
+        samplerate=SAMPLING_RATE,
+        channels=CHANNELS,
+        callback=audio_callback,
+        blocksize=SLIDE_LENGTH,
+    )
+
+    watcher: asyncio.Task | None = None
+    if stop_event is not None:
+
+        async def watch_stop() -> None:
+            await stop_event.wait()
+            audio_queue.put_nowait(stop_sentinel)
+
+        watcher = asyncio.create_task(watch_stop())
 
     buffer = np.zeros(BLOCK_LENGTH, dtype=np.float32)
     last_b = True
     base = BASE_FREQ
-    bit_pairs: list[int] = []
+    pending: list[int] = []
+
+    logger.info("Targeting: %s Hz", float(BASE_FREQ))
+    logger.info("Listening...")
 
     try:
-        with sd.InputStream(
-            samplerate=SAMPLING_RATE,
-            channels=CHANNELS,
-            callback=audio_callback,
-            blocksize=SLIDE_LENGTH,
-        ):
-            while True:
-                data_chunk = audio_queue.get().flatten()
+        while True:
+            chunk = await audio_queue.get()
+            if chunk is stop_sentinel:
+                return
+            data_chunk = chunk.flatten()
 
-                buffer = np.roll(buffer, -len(data_chunk))
-                buffer[-len(data_chunk) :] = data_chunk
+            buffer = np.roll(buffer, -len(data_chunk))
+            buffer[-len(data_chunk) :] = data_chunk
 
-                spec_arr = bft.bft(buffer)
-                magnitudes = np.abs(spec_arr)
+            spec_arr = bft.bft(buffer)
+            magnitudes = np.abs(spec_arr)
 
-                if magnitudes[fidx(base + 1000)] > THRESHOLD:
-                    print("BYTE BOUNDARY")
-                    # Pad any missed symbols so we land on a byte boundary. This is
-                    # idempotent, so repeat detections of the same marker are harmless.
-                    bit_pairs.extend([0] * (-len(bit_pairs) % 4))
-                    # A byte always ends on a slot B symbol, so the next is slot A.
-                    last_b = True
-                    continue
+            if magnitudes[fidx(base + 1000)] > THRESHOLD:
+                # Pad any missed symbols so we land on a byte boundary. This is
+                # idempotent, so repeat detections of the same marker are harmless.
+                if pending:
+                    pending.extend([0] * (-len(pending) % 4))
+                    yield bytes(bit_pairs_to_bytes(pending))
+                    pending.clear()
+                # A byte always ends on a slot B symbol, so the next is slot A.
+                last_b = True
+                continue
 
-                if magnitudes[fidx(base)] > THRESHOLD and last_b:
-                    ms = [magnitudes[fidx(base + k * 100)] for k in (1, 2, 3, 4)]
-                    sym = ms.index(max(ms))
-                    bit_pairs.append(sym)
-                    last_b = False
-                    print("GOT A", sym)
+            if magnitudes[fidx(base)] > THRESHOLD and last_b:
+                ms = [magnitudes[fidx(base + k * 100)] for k in (1, 2, 3, 4)]
+                pending.append(ms.index(max(ms)))
+                last_b = False
 
-                if magnitudes[fidx(base + 500)] > THRESHOLD and not last_b:
-                    ms = [magnitudes[fidx(base + k * 100)] for k in (6, 7, 8, 9)]
-                    sym = ms.index(max(ms))
-                    bit_pairs.append(sym)
-                    last_b = True
-                    print("GOT B", sym)
+            if magnitudes[fidx(base + 500)] > THRESHOLD and not last_b:
+                ms = [magnitudes[fidx(base + k * 100)] for k in (6, 7, 8, 9)]
+                pending.append(ms.index(max(ms)))
+                last_b = True
 
-                if len(bit_pairs) % 4 == 0 and bit_pairs[-4:] == [0, 1, 0, 1]:
-                    print("GOT END MARKER")
-                    raise KeyboardInterrupt
-
-    except KeyboardInterrupt:
-        print("\nStream stopped.")
-        byte_data = bit_pairs_to_bytes(bit_pairs)
-        # latin-1 safely maps raw bytes
-        print(byte_data.decode("latin-1"))
-    except Exception as e:
-        print(f"\nAn error occurred: {e}")
+            if len(pending) == 4:
+                byte_val = bit_pairs_to_bytes(pending)[0]
+                pending.clear()
+                if byte_val == 0x11:
+                    # End-of-message sentinel ([0, 1, 0, 1] in 2-bit symbols).
+                    return
+                yield bytes([byte_val])
+    finally:
+        if watcher is not None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
+        await asyncio.to_thread(stream.close)
 
 
 # =============================================================================
@@ -230,7 +374,7 @@ def receive() -> None:
 # =============================================================================
 
 
-def main(argv: list[str] | None = None) -> None:
+async def _main_async(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="icosa",
         description="Near-ultrasonic acoustic data transmission prototype.",
@@ -244,11 +388,22 @@ def main(argv: list[str] | None = None) -> None:
     mode.add_argument(
         "--rx",
         action="store_true",
-        help="listen on the microphone and decode (Ctrl+C to stop and print)",
+        help="listen on the microphone and decode (Ctrl+C to stop)",
     )
     args = parser.parse_args(argv)
 
     if args.tx is not None:
-        transmit(bytearray(args.tx, encoding="utf-8"))
+        await transmit(bytearray(args.tx, encoding="utf-8"))
     else:
-        receive()
+        async with contextlib.aclosing(receive()) as chunks:
+            async for chunk in chunks:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+
+
+def main(argv: list[str] | None = None) -> None:
+    try:
+        asyncio.run(_main_async(argv))
+    except KeyboardInterrupt:
+        # The receive generator's `finally` has already closed the stream.
+        pass
