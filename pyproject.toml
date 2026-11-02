@@ -1,0 +1,18 @@
+[project]
+name = "icosa"
+version = "0.1.0"
+description = "Acoustic (near-ultrasonic) digital data transmission prototype"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "sounddevice",
+    "audioflux",
+]
+
+[project.scripts]
+icosa = "icosa:main"
+
+[build-system]
+requires = ["uv_build>=0.8.0"]
+build-backend = "uv_build"
